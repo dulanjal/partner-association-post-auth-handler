@@ -25,7 +25,6 @@ import org.wso2.carbon.CarbonException;
 import org.wso2.carbon.core.util.AnonymousSessionUtil;
 import org.wso2.carbon.identity.application.authentication.framework.config.model.StepConfig;
 import org.wso2.carbon.identity.application.authentication.framework.context.AuthenticationContext;
-import org.wso2.carbon.identity.application.authentication.framework.exception.FrameworkException;
 import org.wso2.carbon.identity.application.authentication.framework.exception.PostAuthenticationFailedException;
 import org.wso2.carbon.identity.application.authentication.framework.handler.request.AbstractPostAuthnHandler;
 import org.wso2.carbon.identity.application.authentication.framework.handler.request.PostAuthnHandlerFlowStatus;
@@ -51,6 +50,12 @@ public class PartnerAssociationHandler extends AbstractPostAuthnHandler {
     private final String APP_NAME = "MemberZone";
     private final String LOCAL_ATTR = "http://wso2.org/claims/userid";
     private final String MAPPING_ATTR = "partnerAccId";
+    private final String BACK_END_URL = "http://localhost:8000";
+
+    @Override
+    public String getName() {
+        return "PartnerAssociationHandler";
+    }
 
     @Override
     public PostAuthnHandlerFlowStatus handle(HttpServletRequest httpServletRequest,
@@ -69,113 +74,120 @@ public class PartnerAssociationHandler extends AbstractPostAuthnHandler {
         AuthenticatedUser partnerUser = null;
         String partnerAttribute = null;
 
-        for (Map.Entry<Integer, StepConfig> stepEntry : authenticationContext.getSequenceConfig().getStepMap().entrySet()) {
-            StepConfig stepConfig = stepEntry.getValue();
-            // Get the username from the first step (i.e. authenticated from "LOCAL" IdP)
-            if ("LOCAL".equalsIgnoreCase(stepConfig.getAuthenticatedIdP())) {
-                localUser = stepConfig.getAuthenticatedUser();
-                if (localUser != null) {
-                    // Query any necessary attribute from the local user store
-                    localAttribute = getAttributeFromUserstore(localUser, LOCAL_ATTR);
-                    if (localAttribute == null || localAttribute.isEmpty()) {
-                        throw new PostAuthenticationFailedException("Could not retrieve local attribute value", "");
+        try {
+            for (Map.Entry<Integer, StepConfig> stepEntry : authenticationContext.getSequenceConfig().getStepMap().entrySet()) {
+                StepConfig stepConfig = stepEntry.getValue();
+                // Get the username from the first step (i.e. authenticated from "LOCAL" IdP)
+                if ("LOCAL".equalsIgnoreCase(stepConfig.getAuthenticatedIdP())) {
+                    localUser = stepConfig.getAuthenticatedUser();
+                    if (localUser != null) {
+                        // Query any necessary attribute from the local user store
+                        localAttribute = getAttributeFromUserStore(localUser, LOCAL_ATTR);
+                        //if (localAttribute == null || localAttribute.isEmpty()) {
+                            throw new PartnerAssociationException("Could not retrieve local attribute value");
+                        //}
+                    } else {
+                        throw new PartnerAssociationException("Could not retrieve local user");
                     }
                 } else {
-                    throw new PostAuthenticationFailedException("Could not retrieve local user", "");
-                }
-            } else {
-                // Get the username from the second step (i.e. authenticated from a Partner IdP)
-                partnerUser = stepConfig.getAuthenticatedUser();
-                if (partnerUser != null) {
-                    // Get the required attribute from the attributes map of the second step
-                    for (Map.Entry<ClaimMapping, String> attrEntry : partnerUser.getUserAttributes().entrySet()) {
-                        if (MAPPING_ATTR.equalsIgnoreCase(attrEntry.getKey().getLocalClaim().getClaimUri())) {
-                            partnerAttribute = attrEntry.getValue();
+                    // Get the username from the second step (i.e. authenticated from a Partner IdP)
+                    partnerUser = stepConfig.getAuthenticatedUser();
+                    if (partnerUser != null) {
+                        // Get the required attribute from the attributes map of the second step
+                        for (Map.Entry<ClaimMapping, String> attrEntry : partnerUser.getUserAttributes().entrySet()) {
+                            if (MAPPING_ATTR.equalsIgnoreCase(attrEntry.getKey().getLocalClaim().getClaimUri())) {
+                                partnerAttribute = attrEntry.getValue();
+                            }
                         }
+                        if (partnerAttribute == null || partnerAttribute.isEmpty()) {
+                            throw new PartnerAssociationException("Could not retrieve partner attribute value");
+                        }
+                    } else {
+                        throw new PartnerAssociationException("Could not retrieve partner user");
                     }
-                    if (partnerAttribute == null || partnerAttribute.isEmpty()) {
-                        throw new PostAuthenticationFailedException("Could not retrieve partner attribute value", "");
-                    }
-                } else {
-                    throw new PostAuthenticationFailedException("Could not retrieve partner user", "");
                 }
             }
+            // Call the backend service
+            Map<String, String> reqParams = new HashMap<String, String>();
+            reqParams.put("local-attribute", localAttribute);
+            reqParams.put("partner-attribute", partnerAttribute);
+            sendBackendReq(reqParams);
+        } catch (PartnerAssociationException e) {
+            log.error(e.getMessage(), e);
+            throw new PostAuthenticationFailedException("Partner Association Failed", "Partner Association Failed");
         }
-
-        // Call the backend service
-        Map<String, String> reqParams = new HashMap<String, String>();
-        reqParams.put("local-attribute", localAttribute);
-        reqParams.put("partner-attribute", partnerAttribute);
-        sendBackendReq(reqParams);
 
         return PostAuthnHandlerFlowStatus.SUCCESS_COMPLETED;
     }
 
-    private String getAttributeFromUserstore(AuthenticatedUser user, String claimUri) {
+    private String getAttributeFromUserStore(AuthenticatedUser user, String claimUri) throws PartnerAssociationException {
         String attributeValue = null;
         String tenantDomain = user.getTenantDomain();
         String tenantAwareUserName = user.getUserName();
-        UserRealm realm = null;
+        UserRealm realm = getUserRealm(tenantDomain);
+        if (realm == null) {
+            log.warn("No valid tenant domain provider. No claims found");
+        }
+        UserStoreManager userStore = getUserStoreManager(tenantDomain, realm, user.getUserStoreDomain());
         try {
-            realm = getUserRealm(tenantDomain);
-            if (realm == null) {
-                log.warn("No valid tenant domain provider. No claims found");
-            }
-            UserStoreManager userStore = getUserStoreManager(tenantDomain, realm, user.getUserStoreDomain());
             attributeValue = userStore.getUserClaimValue(tenantAwareUserName, claimUri, null);
-        } catch (FrameworkException | UserStoreException e) {
-            e.printStackTrace();
+        } catch (UserStoreException e) {
+            throw new PartnerAssociationException("Error occurred while getting attribute from user store", e);
         }
         return attributeValue;
     }
 
-    private void sendBackendReq(Map reqParams) {
+    private void sendBackendReq(Map reqParams) throws PartnerAssociationException {
         URL url = null;
         try {
-            url = new URL("http://localhost:8000");
+            url = new URL(BACK_END_URL);
             HttpURLConnection con = null;
             con = (HttpURLConnection) url.openConnection();
             con.setRequestMethod("POST");
-
             con.setDoOutput(true);
             DataOutputStream out = new DataOutputStream(con.getOutputStream());
             out.writeBytes(getParamsString(reqParams));
             out.flush();
             out.close();
-            int responseCode = con.getResponseCode();
-        } catch (MalformedURLException e) {
-            e.printStackTrace();
+            con.getResponseCode();
         } catch (IOException e) {
-            e.printStackTrace();
+            throw new PartnerAssociationException("Error occurred while sending the backend request", e);
         }
     }
 
-
-    public String getParamsString(Map<String, String> params)
-            throws UnsupportedEncodingException {
+    public String getParamsString(Map<String, String> params) throws PartnerAssociationException {
         StringBuilder result = new StringBuilder();
-
         for (Map.Entry<String, String> entry : params.entrySet()) {
-            result.append(URLEncoder.encode(entry.getKey(), "UTF-8"));
-            result.append("=");
-            result.append(URLEncoder.encode(entry.getValue(), "UTF-8"));
-            result.append("&");
+            try {
+                result.append(URLEncoder.encode(entry.getKey(), "UTF-8"));
+                result.append("=");
+                result.append(URLEncoder.encode(entry.getValue(), "UTF-8"));
+                result.append("&");
+            } catch (UnsupportedEncodingException e) {
+                throw new PartnerAssociationException("Error occurred while building the backend request", e);
+            }
         }
-
         String resultString = result.toString();
         return resultString.length() > 0
                 ? resultString.substring(0, resultString.length() - 1)
                 : resultString;
     }
 
-    @Override
-    public String getName() {
-
-        return "PartnerAssociationHandler";
+    private UserRealm getUserRealm(String tenantDomain) throws PartnerAssociationException {
+        UserRealm realm;
+        try {
+            realm = AnonymousSessionUtil.getRealmByTenantDomain(
+                    PartnerAssociationHandlerServiceComponent.getRegistryService(),
+                    PartnerAssociationHandlerServiceComponent.getRealmService(), tenantDomain);
+        } catch (CarbonException e) {
+            throw new PartnerAssociationException("Error occurred while retrieving the Realm for " +
+                    tenantDomain + " to handle local claims", e);
+        }
+        return realm;
     }
 
     private UserStoreManager getUserStoreManager(String tenantDomain, UserRealm realm, String userDomain) throws
-            FrameworkException {
+            PartnerAssociationException {
         UserStoreManager userStore = null;
         try {
             userStore = realm.getUserStoreManager();
@@ -184,26 +196,13 @@ public class PartnerAssociationHandler extends AbstractPostAuthnHandler {
             }
             if (userStore == null) {
                 // To avoid NPEs
-                throw new FrameworkException("Invalid user store domain name : " + userDomain + " in tenant : "
+                throw new PartnerAssociationException("Invalid user store domain name : " + userDomain + " in tenant : "
                         + tenantDomain);
             }
         } catch (UserStoreException e) {
-            throw new FrameworkException("Error occurred while retrieving the UserStoreManager " +
+            throw new PartnerAssociationException("Error occurred while retrieving the UserStoreManager " +
                     "from Realm for " + tenantDomain + " to handle local claims", e);
         }
         return userStore;
-    }
-
-    private UserRealm getUserRealm(String tenantDomain) throws FrameworkException {
-        UserRealm realm;
-        try {
-            realm = AnonymousSessionUtil.getRealmByTenantDomain(
-                    PartnerAssociationHandlerServiceComponent.getRegistryService(),
-                    PartnerAssociationHandlerServiceComponent.getRealmService(), tenantDomain);
-        } catch (CarbonException e) {
-            throw new FrameworkException("Error occurred while retrieving the Realm for " +
-                    tenantDomain + " to handle local claims", e);
-        }
-        return realm;
     }
 }
