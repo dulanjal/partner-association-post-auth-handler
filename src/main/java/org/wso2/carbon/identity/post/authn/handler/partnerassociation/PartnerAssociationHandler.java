@@ -33,6 +33,8 @@ public class PartnerAssociationHandler extends AbstractPostAuthnHandler {
     private final String LOCAL_ATTR = "http://wso2.org/claims/userid";
     private final String MAPPING_ATTR = "partnerAccId";
     private final String BACK_END_URL = "http://localhost:8000";
+    private final String REQ_PARAM_LOCAL = "local-attribute";
+    private final String REQ_PARAM_PARTNER = "partner-attribute";
 
     @Override
     public String getName() {
@@ -65,9 +67,9 @@ public class PartnerAssociationHandler extends AbstractPostAuthnHandler {
                     if (localUser != null) {
                         // Query any necessary attribute from the local user store
                         localAttribute = getAttributeFromUserStore(localUser, LOCAL_ATTR);
-                        //if (localAttribute == null || localAttribute.isEmpty()) {
+                        if (localAttribute == null || localAttribute.isEmpty()) {
                             throw new PartnerAssociationException("Could not retrieve local attribute value");
-                        //}
+                        }
                     } else {
                         throw new PartnerAssociationException("Could not retrieve local user");
                     }
@@ -91,8 +93,8 @@ public class PartnerAssociationHandler extends AbstractPostAuthnHandler {
             }
             // Call the backend service
             Map<String, String> reqParams = new HashMap<String, String>();
-            reqParams.put("local-attribute", localAttribute);
-            reqParams.put("partner-attribute", partnerAttribute);
+            reqParams.put(REQ_PARAM_LOCAL, localAttribute);
+            reqParams.put(REQ_PARAM_PARTNER, partnerAttribute);
             sendBackendReq(reqParams);
         } catch (PartnerAssociationException e) {
             log.error(e.getMessage(), e);
@@ -137,7 +139,7 @@ public class PartnerAssociationHandler extends AbstractPostAuthnHandler {
         }
     }
 
-    public String getParamsString(Map<String, String> params) throws PartnerAssociationException {
+    private String getParamsString(Map<String, String> params) throws PartnerAssociationException {
         StringBuilder result = new StringBuilder();
         for (Map.Entry<String, String> entry : params.entrySet()) {
             try {
